@@ -11,7 +11,7 @@ namespace TaskManagerTelegramBot_Bulatov
 {
     public class Worker : BackgroundService
     {
-        readonly string Token = "";
+        readonly string Token = "8595695924:AAHJq3NZAj2Ej8oVNiixNMC0wKi314Gmp88";
         TelegramBotClient TelegramBotClient;
         List<Users> Users = new List<Users>();
         Timer Timer;
