@@ -90,7 +90,7 @@ namespace TaskManagerTelegramBot_Bulatov
                     {
                         await TelegramBotClient.SendMessage(
                             chatId,
-                            $"Уведомить пользователя: {Event.TIme.ToString("HH:mm dd:MM:yyyy")}" +
+                            $"Уведомить пользователя: {Event.Time.ToString("HH:mm dd:MM:yyyy")}" +
                             $"\n Сообщение: {Event.Message}",
                             replyMarkup: DeleteEvent(Event.Message)
                             );
@@ -174,6 +174,25 @@ namespace TaskManagerTelegramBot_Bulatov
         {
             Console.WriteLine("Ошибка: " + exception.Message);
         }
+        public async void Tick(object obj)
+        {
+            string TimeNow = DateTime.Now.ToString("HH:mm dd.MM.yyyy");
+
+            foreach (Users User in Users)
+            {
+                for (int i = 0; i < User.Events.Count; i++)
+                {
+                    if (User.Events[i].Time.ToString("HH:mm dd.MM.yyyy") != TimeNow)
+                        continue;
+
+                    await TelegramBotClient.SendMessage(
+                        User.IdUser,
+                        "Напоминание: " + User.Events[i].Message);
+
+                    User.Events.Remove(User.Events[i]);
+                }
+            }
+        }
         private readonly ILogger<Worker> _logger;
 
         public Worker(ILogger<Worker> logger)
@@ -183,14 +202,16 @@ namespace TaskManagerTelegramBot_Bulatov
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                if (_logger.IsEnabled(LogLevel.Information))
-                {
-                    _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
-                }
-                await Task.Delay(1000, stoppingToken);
-            }
+            TelegramBotClient = new TelegramBotClient(Token);
+
+            TelegramBotClient.StartReceiving(
+                HandleUpdateAsync,
+                HandleErrorAsync,
+                null,
+                new CancellationTokenSource().Token);
+
+            TimerCallback TimerCallback = new TimerCallback(Tick);
+            Timer = new Timer(TimerCallback, 0, 0, 60 * 1000);
         }
     }
 }
