@@ -69,6 +69,17 @@ namespace TaskManagerTelegramBot_Bulatov
             return new ReplyKeyboardMarkup(rows) { ResizeKeyboard = true, OneTimeKeyboard = true };
         }
 
+        public InlineKeyboardMarkup GetDeleteButton(int taskId)
+        {
+            return new InlineKeyboardMarkup(new[]
+            {
+                new[]
+                {
+                    InlineKeyboardButton.WithCallbackData("🗑️ Удалить задачу", $"delete_{taskId}")
+                }
+            });
+        }
+
         public async Task SendMessage(long chatId, int type)
         {
             if (type < 0 || type >= Messages.Count)
@@ -114,13 +125,21 @@ namespace TaskManagerTelegramBot_Bulatov
                 return;
             }
 
+            await TelegramBotClient.SendMessage(
+                chatId,
+                $"📋 Ваши задачи ({user.Events.Count}):",
+                ParseMode.Html);
+
             foreach (var ev in user.Events)
             {
                 string repeatInfo = ev.IsRecurring ? " 🔁" : "";
+                string taskText = $"<b>⏰ {ev.Time:HH:mm dd.MM.yyyy}{repeatInfo}</b>\n{ev.Message}";
+
                 await TelegramBotClient.SendMessage(
                     chatId,
-                    $"<b>⏰ {ev.Time:HH:mm dd.MM.yyyy}{repeatInfo}</b>\n{ev.Message}",
-                    ParseMode.Html);
+                    taskText,
+                    ParseMode.Html,
+                    replyMarkup: GetDeleteButton(ev.Id));
             }
         }
 
@@ -171,9 +190,13 @@ namespace TaskManagerTelegramBot_Bulatov
                 var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == message.Chat.Id);
                 if (user != null && user.Events.Any())
                 {
+                    int count = user.Events.Count;
                     db.Events.RemoveRange(user.Events);
                     await db.SaveChangesAsync();
-                    await SendMessage(message.Chat.Id, 6);
+                    await TelegramBotClient.SendMessage(
+                        message.Chat.Id,
+                        $"✅ Удалено {count} задач",
+                        replyMarkup: GetButtons());
                 }
                 else
                 {
@@ -286,25 +309,38 @@ namespace TaskManagerTelegramBot_Bulatov
 
         private async Task HandleUpdate(ITelegramBotClient client, Update update, CancellationToken token)
         {
-            if (update.Message != null)
+            if (update.Type == UpdateType.Message)
             {
                 ProcessMessage(update.Message);
             }
-            else if (update.CallbackQuery != null)
+            else if (update.Type == UpdateType.CallbackQuery)
             {
                 var query = update.CallbackQuery;
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-                var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == query.Message.Chat.Id);
-                if (user != null)
+                if (query.Data.StartsWith("delete_"))
                 {
-                    var task = user.Events.FirstOrDefault(e => e.Message == query.Data);
-                    if (task != null)
+                    if (int.TryParse(query.Data.Replace("delete_", ""), out int taskId))
                     {
-                        db.Events.Remove(task);
-                        await db.SaveChangesAsync();
-                        await SendMessage(query.Message.Chat.Id, 5);
+                        var task = await db.Events
+                            .Include(e => e.User)
+                            .FirstOrDefaultAsync(e => e.Id == taskId && e.User.IdUser == query.Message.Chat.Id);
+
+                        if (task != null)
+                        {
+                            db.Events.Remove(task);
+                            await db.SaveChangesAsync();
+
+                            await TelegramBotClient.SendMessage(
+                                query.Message.Chat.Id,
+                                $"✅ Задача удалена: {task.Message}",
+                                replyMarkup: GetButtons());
+
+                                await TelegramBotClient.DeleteMessage(
+                                    query.Message.Chat.Id,
+                                    query.Message.MessageId);
+                        }
                     }
                 }
             }
