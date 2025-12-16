@@ -14,7 +14,6 @@ namespace TaskManagerTelegramBot_Bulatov
         readonly string Token = "8595695924:AAHJq3NZAj2Ej8oVNiixNMC0wKi314Gmp88";
         TelegramBotClient TelegramBotClient;
         private readonly IServiceScopeFactory _scopeFactory;
-        private readonly ILogger<Worker> _logger;
         Timer Timer;
         List<string> Messages = new List<string>()
         {
@@ -36,258 +35,313 @@ namespace TaskManagerTelegramBot_Bulatov
             "",
             "Задачи пользователя не найдены.",
             "Событие удалено.",
-            "Все события удалены."
-            };
+            "Все события удалены.",
+            "Выберите тип повтора:",
+            "Задача создана с повтором: ",
+            "Задача создана без повтора.",
+            "Указанное вами время и дата не могут быть установлены, потому что сейчас уже: "
+        };
 
-        public Worker(ILogger<Worker> logger, IServiceScopeFactory scopeFactory)
+        public Worker(IServiceScopeFactory scopeFactory)
         {
-            _logger = logger;
             _scopeFactory = scopeFactory;
         }
 
-        public bool CheckFormatDateTime(string value, out DateTime time)
-        {
-            return DateTime.TryParse(value, out time);
-        }
         public static ReplyKeyboardMarkup GetButtons()
         {
-            List<KeyboardButton> keyboardButtons = new List<KeyboardButton>();
-            keyboardButtons.Add(new KeyboardButton("Удалить все задачи"));
-            return new ReplyKeyboardMarkup
+            List<KeyboardButton> buttons = new List<KeyboardButton>
             {
-                Keyboard = new List<List<KeyboardButton>>() { keyboardButtons }
+                new KeyboardButton("Удалить все задачи"),
+                new KeyboardButton("Мои задачи"),
+                new KeyboardButton("Создать задачу")
             };
-        }
-        public static InlineKeyboardMarkup DeleteEvent(string Message)
-        {
-            List<InlineKeyboardButton> inlineKeyboards = new List<InlineKeyboardButton>();
-            inlineKeyboards.Add(new InlineKeyboardButton("Удалить", Message));
-            return new InlineKeyboardMarkup(inlineKeyboards);
+            return new ReplyKeyboardMarkup(buttons) { ResizeKeyboard = true };
         }
 
-        public async void SendMessage(long chatId, int typeMessage)
+        public static ReplyKeyboardMarkup GetRepeatButtons()
         {
-            if (typeMessage != 3)
+            List<List<KeyboardButton>> rows = new List<List<KeyboardButton>>
+            {
+                new List<KeyboardButton> { new KeyboardButton("Без повтора"), new KeyboardButton("Ежедневно") },
+                new List<KeyboardButton> { new KeyboardButton("По будням"), new KeyboardButton("Еженедельно") },
+                new List<KeyboardButton> { new KeyboardButton("Ежемесячно"), new KeyboardButton("Отмена") }
+            };
+            return new ReplyKeyboardMarkup(rows) { ResizeKeyboard = true, OneTimeKeyboard = true };
+        }
+
+        public async Task SendMessage(long chatId, int type)
+        {
+            if (type < 0 || type >= Messages.Count)
+            {
+                await TelegramBotClient.SendMessage(chatId, "Ошибка: неверный тип сообщения");
+                return;
+            }
+
+            if (type == 3)
             {
                 await TelegramBotClient.SendMessage(
                     chatId,
-                    Messages[typeMessage],
+                    $"{Messages[10]}{DateTime.Now:HH:mm dd.MM.yyyy}",
                     ParseMode.Html,
-                    replyMarkup: GetButtons()
-                    );
+                    replyMarkup: GetButtons());
+                return;
             }
-            else if (typeMessage == 3)
-            {
-                await TelegramBotClient.SendMessage(
-                    chatId,
-                    $"Указанное вами время и дата не могут быть установлены, " +
-                    $"потому что сейчас уже: {DateTime.Now.ToString("HH:mm dd.MM.yyyy")}");
-            }
+
+            await TelegramBotClient.SendMessage(
+                chatId,
+                Messages[type],
+                ParseMode.Html,
+                replyMarkup: type == 7 ? GetRepeatButtons() : GetButtons());
         }
-        public async void Command(long chatId, string command)
+
+        class PendingTask
         {
+            public DateTime Time { get; set; }
+            public string Text { get; set; } = "";
+        }
+
+        private Dictionary<long, PendingTask> pendingTasks = new Dictionary<long, PendingTask>();
+
+        private async void ProcessMessage(Message message)
+        {
+            Console.WriteLine($"Сообщение: {message.Text} от {message.Chat.Username}");
+
             using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-            if (command.ToLower() == "/start")
-                SendMessage(chatId, 0);
-            else if (command.ToLower() == "/create_task")
-                SendMessage(chatId, 1);
-            else if (command.ToLower() == "/list_tasks")
+            if (message.Text.StartsWith("/"))
             {
-                var user = await dbContext.Users
-                    .Include(u => u.Events)
-                    .FirstOrDefaultAsync(x => x.IdUser == chatId);
-
-                if (user == null)
-                    SendMessage(chatId, 4);
-                else if (user.Events.Count == 0)
-                    SendMessage(chatId, 4);
-                else
+                if (message.Text == "/start" || message.Text == "/create_task" || message.Text == "Создать задачу")
                 {
-                    foreach (Events Event in user.Events)
+                    await TelegramBotClient.SendMessage(
+                        message.Chat.Id,
+                        Messages[0],
+                        ParseMode.Html,
+                        replyMarkup: GetButtons());
+                }
+                else if (message.Text == "/list_tasks" || message.Text == "/mytasks" || message.Text == "Мои задачи")
+                {
+                    var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == message.Chat.Id);
+                    if (user == null || user.Events.Count == 0)
                     {
-                        await TelegramBotClient.SendMessage(
-                            chatId,
-                            $"Уведомить пользователя: {Event.Time.ToString("HH:mm dd.MM.yyyy")}" +
-                            $"\n Сообщение: {Event.Message}",
-                            replyMarkup: DeleteEvent(Event.Message)
-                            );
+                        await SendMessage(message.Chat.Id, 4);
+                    }
+                    else
+                    {
+                        foreach (var ev in user.Events)
+                        {
+                            string repeatInfo = ev.IsRecurring ? " 🔁" : "";
+                            await TelegramBotClient.SendMessage(
+                                message.Chat.Id,
+                                $"{ev.Time:HH:mm dd.MM.yyyy}{repeatInfo}\n{ev.Message}",
+                                ParseMode.Html);
+                        }
                     }
                 }
             }
-        }
-
-        private async void GetMessages(Message message)
-        {
-            Console.WriteLine("Получено сообщение: " + message.Text + " от пользователя: " + message.Chat.Username);
-            long IdUser = message.Chat.Id;
-            string MessageUser = message.Text;
-
-            using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-            if (message.Text.Contains("/"))
-                Command(message.Chat.Id, message.Text);
-            else if (message.Text.Equals("Удалить все задачи"))
+            else if (message.Text == "Удалить все задачи")
             {
-                var user = await dbContext.Users
-                    .Include(u => u.Events)
-                    .FirstOrDefaultAsync(x => x.IdUser == message.Chat.Id);
-
-                if (user == null)
-                    SendMessage(message.Chat.Id, 4);
-                else if (user.Events.Count == 0)
-                    SendMessage(user.IdUser, 4);
+                var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == message.Chat.Id);
+                if (user != null && user.Events.Any())
+                {
+                    db.Events.RemoveRange(user.Events);
+                    await db.SaveChangesAsync();
+                    await SendMessage(message.Chat.Id, 6);
+                }
                 else
                 {
-                    dbContext.Events.RemoveRange(user.Events);
-                    user.Events.Clear();
-                    await dbContext.SaveChangesAsync();
-                    SendMessage(user.IdUser, 6);
+                    await SendMessage(message.Chat.Id, 4);
                 }
+            }
+            else if (pendingTasks.ContainsKey(message.Chat.Id))
+            {
+                var pending = pendingTasks[message.Chat.Id];
+
+                if (message.Text == "Отмена")
+                {
+                    pendingTasks.Remove(message.Chat.Id);
+                    await TelegramBotClient.SendMessage(
+                        message.Chat.Id,
+                        "Создание задачи отменено.",
+                        replyMarkup: GetButtons());
+                    return;
+                }
+
+                string repeatType = "none";
+                if (message.Text == "Ежедневно") repeatType = "daily";
+                else if (message.Text == "По будням") repeatType = "weekdays";
+                else if (message.Text == "Еженедельно") repeatType = "weekly";
+                else if (message.Text == "Ежемесячно") repeatType = "monthly";
+
+                var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == message.Chat.Id);
+                if (user == null)
+                {
+                    user = new Users(message.Chat.Id, message.Chat.Username ?? "");
+                    db.Users.Add(user);
+                    await db.SaveChangesAsync();
+                }
+
+                var newEvent = new Events(pending.Time, pending.Text, user.Id);
+
+                if (repeatType != "none")
+                {
+                    newEvent.IsRecurring = true;
+                    newEvent.RecurrencePattern = repeatType;
+                    await TelegramBotClient.SendMessage(
+                        message.Chat.Id,
+                        $"{Messages[8]}{message.Text}",
+                        replyMarkup: GetButtons());
+                }
+                else
+                {
+                    await TelegramBotClient.SendMessage(
+                        message.Chat.Id,
+                        Messages[9],
+                        replyMarkup: GetButtons());
+                }
+
+                user.Events.Add(newEvent);
+                await db.SaveChangesAsync();
+                pendingTasks.Remove(message.Chat.Id);
             }
             else
             {
-                var user = await dbContext.Users
-                    .Include(u => u.Events)
-                    .FirstOrDefaultAsync(x => x.IdUser == message.Chat.Id);
-
-                if (user == null)
+                string[] parts = message.Text.Split('\n');
+                if (parts.Length < 2)
                 {
-                    user = new Users(message.Chat.Id, message.Chat.Username ?? string.Empty);
-                    dbContext.Users.Add(user);
-                    await dbContext.SaveChangesAsync();
-                }
-
-                string[] Info = message.Text.Split('\n');
-                if (Info.Length < 2)
-                {
-                    SendMessage(message.Chat.Id, 2);
+                    await SendMessage(message.Chat.Id, 2);
                     return;
                 }
 
-                DateTime Time;
-                if (CheckFormatDateTime(Info[0], out Time) == false)
+                if (!DateTime.TryParse(parts[0], out DateTime taskTime))
                 {
-                    SendMessage(message.Chat.Id, 2);
+                    await SendMessage(message.Chat.Id, 2);
                     return;
                 }
 
-                if (Time < DateTime.Now)
+                if (taskTime < DateTime.Now)
                 {
-                    SendMessage(message.Chat.Id, 3);
+                    await SendMessage(message.Chat.Id, 3);
                     return;
                 }
 
-                var newEvent = new Events(
-                    Time,
-                    message.Text.Replace(Time.ToString("HH:mm dd.MM.yyyy") + "\n", ""),
-                    user.Id);
+                pendingTasks[message.Chat.Id] = new PendingTask
+                {
+                    Time = taskTime,
+                    Text = string.Join("\n", parts.Skip(1))
+                };
 
-                user.Events.Add(newEvent);
-                await dbContext.SaveChangesAsync();
-
-                await TelegramBotClient.SendMessage(
-                    message.Chat.Id,
-                    $"Напоминание добавлено на {Time.ToString("HH:mm dd.MM.yyyy")}",
-                    replyMarkup: GetButtons());
+                await SendMessage(message.Chat.Id, 7);
             }
         }
 
-        private async Task HandleUpdateAsync(
-            ITelegramBotClient client,
-            Update update,
-            CancellationToken cancellationToken)
+        private DateTime CalculateNextTime(DateTime current, string repeatType)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-            if (update.Type == UpdateType.Message)
-                GetMessages(update.Message);
-            else if (update.Type == UpdateType.CallbackQuery)
+            return repeatType switch
             {
-                CallbackQuery query = update.CallbackQuery;
+                "daily" => current.AddDays(1),
+                "weekdays" => GetNextWeekday(current),
+                "weekly" => current.AddDays(7),
+                "monthly" => current.AddMonths(1),
+                _ => current
+            };
+        }
 
-                var user = await dbContext.Users
-                    .Include(u => u.Events)
-                    .FirstOrDefaultAsync(x => x.IdUser == query.Message.Chat.Id);
+        private DateTime GetNextWeekday(DateTime current)
+        {
+            DateTime next = current.AddDays(1);
+            while (next.DayOfWeek == DayOfWeek.Saturday || next.DayOfWeek == DayOfWeek.Sunday)
+            {
+                next = next.AddDays(1);
+            }
+            return next;
+        }
 
+        private async Task HandleUpdate(ITelegramBotClient client, Update update, CancellationToken token)
+        {
+            if (update.Message != null)
+            {
+                ProcessMessage(update.Message);
+            }
+            else if (update.CallbackQuery != null)
+            {
+                var query = update.CallbackQuery;
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+                var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == query.Message.Chat.Id);
                 if (user != null)
                 {
-                    var eventToRemove = user.Events.FirstOrDefault(x => x.Message == query.Data);
-                    if (eventToRemove != null)
+                    var task = user.Events.FirstOrDefault(e => e.Message == query.Data);
+                    if (task != null)
                     {
-                        dbContext.Events.Remove(eventToRemove);
-                        await dbContext.SaveChangesAsync();
-                        SendMessage(query.Message.Chat.Id, 5);
+                        db.Events.Remove(task);
+                        await db.SaveChangesAsync();
+                        await SendMessage(query.Message.Chat.Id, 5);
                     }
                 }
             }
         }
 
-        private async Task HandleErrorAsync(
-            ITelegramBotClient client,
-            Exception exception,
-            HandleErrorSource source,
-            CancellationToken token)
+        private Task HandleError(ITelegramBotClient client, Exception error, CancellationToken token)
         {
-            Console.WriteLine("Ошибка: " + exception.Message);
+            Console.WriteLine($"Ошибка: {error.Message}");
+            return Task.CompletedTask;
         }
 
-        public async void Tick(object obj)
+        public async void CheckReminders(object state)
         {
             using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
             var now = DateTime.Now;
-            var startOfMinute = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0);
-            var endOfMinute = startOfMinute.AddMinutes(1).AddSeconds(-1);
+            var start = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0);
+            var end = start.AddMinutes(1);
 
-            var eventsToNotify = await dbContext.Events
-                .Include(e => e.User)
-                .Where(e => e.Time >= startOfMinute && e.Time <= endOfMinute)
-                .ToListAsync();
+            var tasks = await db.Events.Include(e => e.User).Where(e => e.Time >= start && e.Time < end).ToListAsync();
 
-            foreach (var eventItem in eventsToNotify)
+            foreach (var task in tasks)
             {
                 try
                 {
-                    await TelegramBotClient.SendMessage(
-                        eventItem.User.IdUser,
-                        "Напоминание: " + eventItem.Message);
+                    await TelegramBotClient.SendMessage(task.User.IdUser, $"Напоминание: {task.Message}");
 
-                    dbContext.Events.Remove(eventItem);
+                    if (task.IsRecurring && !string.IsNullOrEmpty(task.RecurrencePattern))
+                    {
+                        var nextTime = CalculateNextTime(task.Time, task.RecurrencePattern);
+                        var newTask = new Events(nextTime, task.Message, task.UserId)
+                        {
+                            IsRecurring = true,
+                            RecurrencePattern = task.RecurrencePattern
+                        };
+                        db.Events.Add(newTask);
+                    }
+
+                    db.Events.Remove(task);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Ошибка при отправке напоминания: {ex.Message}");
+                    Console.WriteLine($"Ошибка: {ex.Message}");
                 }
             }
 
-            if (eventsToNotify.Any())
+            if (tasks.Any())
             {
-                await dbContext.SaveChangesAsync();
+                await db.SaveChangesAsync();
             }
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-            await dbContext.Database.EnsureCreatedAsync();
+            await db.Database.EnsureCreatedAsync();
 
             TelegramBotClient = new TelegramBotClient(Token);
+            TelegramBotClient.StartReceiving(HandleUpdate, HandleError, null, stoppingToken);
 
-            TelegramBotClient.StartReceiving(
-                HandleUpdateAsync,
-                HandleErrorAsync,
-                null,
-                new CancellationTokenSource().Token);
-
-            TimerCallback TimerCallback = new TimerCallback(Tick);
-            Timer = new Timer(TimerCallback, 0, 0, 60 * 1000);
+            Timer = new Timer(CheckReminders, null, 0, 60000);
         }
     }
 }

@@ -35,6 +35,8 @@ namespace TaskManagerTelegramBot_Bulatov.Data
                 entity.Property(e => e.Id).ValueGeneratedOnAdd();
                 entity.Property(e => e.Time).IsRequired();
                 entity.Property(e => e.Message).IsRequired().HasMaxLength(1000);
+                entity.Property(e => e.IsRecurring).HasDefaultValue(false);
+                entity.Property(e => e.RecurrencePattern).HasMaxLength(50);
                 entity.HasIndex(e => e.Time);
                 entity.HasIndex(e => e.UserId);
             });
