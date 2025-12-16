@@ -102,6 +102,28 @@ namespace TaskManagerTelegramBot_Bulatov
 
         private Dictionary<long, PendingTask> pendingTasks = new Dictionary<long, PendingTask>();
 
+        private async void ShowMyTasks(long chatId)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == chatId);
+            if (user == null || user.Events.Count == 0)
+            {
+                await SendMessage(chatId, 4);
+                return;
+            }
+
+            foreach (var ev in user.Events)
+            {
+                string repeatInfo = ev.IsRecurring ? " 🔁" : "";
+                await TelegramBotClient.SendMessage(
+                    chatId,
+                    $"<b>⏰ {ev.Time:HH:mm dd.MM.yyyy}{repeatInfo}</b>\n{ev.Message}",
+                    ParseMode.Html);
+            }
+        }
+
         private async void ProcessMessage(Message message)
         {
             Console.WriteLine($"Сообщение: {message.Text} от {message.Chat.Username}");
@@ -111,7 +133,7 @@ namespace TaskManagerTelegramBot_Bulatov
 
             if (message.Text.StartsWith("/"))
             {
-                if (message.Text == "/start" || message.Text == "/create_task" || message.Text == "Создать задачу")
+                if (message.Text == "/start")
                 {
                     await TelegramBotClient.SendMessage(
                         message.Chat.Id,
@@ -119,25 +141,30 @@ namespace TaskManagerTelegramBot_Bulatov
                         ParseMode.Html,
                         replyMarkup: GetButtons());
                 }
-                else if (message.Text == "/list_tasks" || message.Text == "/mytasks" || message.Text == "Мои задачи")
+                else if (message.Text == "/create_task")
                 {
-                    var user = await db.Users.Include(u => u.Events).FirstOrDefaultAsync(u => u.IdUser == message.Chat.Id);
-                    if (user == null || user.Events.Count == 0)
-                    {
-                        await SendMessage(message.Chat.Id, 4);
-                    }
-                    else
-                    {
-                        foreach (var ev in user.Events)
-                        {
-                            string repeatInfo = ev.IsRecurring ? " 🔁" : "";
-                            await TelegramBotClient.SendMessage(
-                                message.Chat.Id,
-                                $"{ev.Time:HH:mm dd.MM.yyyy}{repeatInfo}\n{ev.Message}",
-                                ParseMode.Html);
-                        }
-                    }
+                    await TelegramBotClient.SendMessage(
+                        message.Chat.Id,
+                        Messages[1],
+                        ParseMode.Html,
+                        replyMarkup: GetButtons());
                 }
+                else if (message.Text == "/list_tasks" || message.Text == "/mytasks")
+                {
+                    ShowMyTasks(message.Chat.Id);
+                }
+            }
+            else if (message.Text == "Мои задачи")
+            {
+                ShowMyTasks(message.Chat.Id);
+            }
+            else if (message.Text == "Создать задачу")
+            {
+                await TelegramBotClient.SendMessage(
+                    message.Chat.Id,
+                    Messages[1],
+                    ParseMode.Html,
+                    replyMarkup: GetButtons());
             }
             else if (message.Text == "Удалить все задачи")
             {
